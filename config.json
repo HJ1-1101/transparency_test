@@ -1,0 +1,52 @@
+{
+  "environment": "/Isaac/Environments/Simple_Room/simple_room.usd",
+  "asset_root": null,
+  "room_translation_m": [0.0, 0.0, 0.0],
+  "bench_origin_m": [0.0, 0.0, 1.2],
+  "cup_asset": "/Isaac/Props/Mugs/SM_Mug_A2.usd",
+  "slot_spacing_m": 0.25,
+  "material_order": ["opaque", "omniglass", "transparent", "omniglass_water"],
+  "transparent_opacity": 0.05,
+  "glass_ior": 1.5,
+  "glass_roughness": 0.01,
+  "water": {
+    "ior": 1.333,
+    "radius_m": 0.038,
+    "base_offset_m": 0.01,
+    "height_m": 0.055
+  },
+  "realsense": {
+    "asset": "/Isaac/Sensors/RealSense/D455/rsd455.usd",
+    "camera_prim_name": "Camera_Pseudo_Depth"
+  },
+  "lidar": {
+    "mount_height_m": 0.25,
+    "far_range_m": 2.0,
+    "aux_output_level": "FULL"
+  },
+  "background_offset_m": 0.6,
+  "camera": {
+    "resolution_hw": [480, 640],
+    "horizontal_fov_deg": 60.0,
+    "near_m": 0.05,
+    "far_m": 10.0
+  },
+  "dsd": {
+    "baseline_mm": 75.0,
+    "max_disparity_px": 160.0,
+    "confidence_threshold": 1.0,
+    "noise_mean": 0.25,
+    "noise_sigma": 0.25,
+    "noise_downscale": 1.0,
+    "outlier_removal": true,
+    "min_distance_m": 0.4,
+    "max_distance_m": 10.0
+  },
+  "capture": {
+    "distances_m": [0.6, 0.8, 1.0, 1.2],
+    "angles_deg": [0.0, 5.0, 10.0, 20.0],
+    "warmup_frames": 30,
+    "samples_per_pose": 3,
+    "frames_between_samples": 3
+  }
+}
