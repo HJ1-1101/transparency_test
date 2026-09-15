@@ -56,8 +56,9 @@ class DepthSensorModule:
         self.rgb_backends = {}
         self.camera_prims = {}
         self.depth_range = {}
-        self.mount_roots = {}
         self.vendor_parameters = {}
+        self.intrinsics = {}
+        self.pixel_aligned = {}
         self.selected = modes[0]
         stage = omni.usd.get_context().get_stage()
         for mode in modes:
@@ -65,6 +66,15 @@ class DepthSensorModule:
                 raise ValueError(f"Unsupported mode: {mode}")
             if mode == "realsense":
                 camera, authored = self._build_vendor_camera(cfg, asset_root, stage)
+                optics = self.vendor_parameters[mode]
+                height, width = self.resolution
+                # Vendor optics, so this camera does not share the rig's field of
+                # view and its pixels are not the same rays as the other cameras'.
+                self.intrinsics[mode] = np.array([
+                    [width * optics["focal_length"] / optics["horizontal_aperture"], 0, width / 2],
+                    [0, height * optics["focal_length"] / optics["vertical_aperture"], height / 2],
+                    [0, 0, 1]])
+                self.pixel_aligned[mode] = False
             else:
                 path = f"/World/SensorRig/{mode}/Camera"
                 authored = RtxCamera(path)
@@ -72,6 +82,8 @@ class DepthSensorModule:
                 camera.CreateFocalLengthAttr(20.0)
                 camera.CreateHorizontalApertureAttr(20.0 * self.resolution[1] / self.k[0, 0])
                 camera.CreateVerticalApertureAttr(20.0 * self.resolution[0] / self.k[1, 1])
+                self.intrinsics[mode] = self.k
+                self.pixel_aligned[mode] = True
             # The near plane drives the near**2 correction, so every camera shares it.
             camera.CreateClippingRangeAttr((cfg["camera"]["near_m"], RENDER_FAR_M))
             if mode == "dip":
@@ -81,10 +93,21 @@ class DepthSensorModule:
                 sensor = SingleViewDepthCameraSensor(authored, resolution=self.resolution,
                     annotators=["depth_sensor_distance", "depth_sensor_point_cloud_position"])
                 if mode == "realsense":
-                    # The asset ships a template render product, already copied onto
-                    # this one by SingleViewDepthCameraSensor. Keep those numbers.
-                    self.vendor_parameters[mode] = self._depth_parameters(sensor)
-                    low, high = sensor.get_sensor_distance_cutoffs()
+                    vendor = self.vendor_parameters[mode]
+                    sensor.set_sensor_baseline(float(vendor["baselineMM"]))
+                    sensor.set_sensor_focal_length(float(vendor["focalLengthPixel"]))
+                    sensor.set_sensor_size(float(vendor["sensorSizePixel"]))
+                    sensor.set_sensor_maximum_disparity(float(vendor["maxDisparityPixel"]))
+                    sensor.set_sensor_disparity_confidence(float(vendor["confidenceThreshold"]))
+                    sensor.set_sensor_noise_parameters(float(vendor["noiseMean"]),
+                                                       float(vendor["noiseSigma"]))
+                    sensor.set_sensor_disparity_noise_downscale(
+                        float(vendor["noiseDownscaleFactorPixel"]))
+                    sensor.set_enabled_outlier_removal(bool(vendor["outlierRemovalEnabled"]))
+                    # The vendor max distance is 1e7, which would pass anything as
+                    # valid, so the scene's far bound caps it.
+                    low = float(vendor["minDistance"])
+                    high = min(float(vendor["maxDistance"]), cfg["camera"]["far_m"])
                 else:
                     dsd = cfg["dsd"]
                     sensor.set_sensor_baseline(dsd["baseline_mm"])
@@ -114,33 +137,52 @@ class DepthSensorModule:
         for sensor in set(self.backends.values()) | set(self.rgb_backends.values()):
             self._configure_native_resolution(sensor.render_product.GetPrim())
 
-    def _build_vendor_camera(self, cfg, asset_root, stage):
-        """Reference a vendor depth-camera asset and wrap its depth camera prim."""
-        from isaacsim.sensors.experimental.rtx import RtxCamera
+    @staticmethod
+    def read_vendor_profile(url):
+        """Depth-sensor parameters and optics from a vendor asset's template render product.
+
+        The asset is read, not referenced. A camera prim brought in by a reference
+        keeps rendering from its authored place: moving it through USD xform ops or
+        through set_world_poses updates the prim, and the renderer ignores both.
+        """
         from pxr import Usd, UsdGeom
+
+        stage = Usd.Stage.Open(url)
+        if stage is None:
+            raise RuntimeError(f"Could not open vendor asset: {url}")
+        for prim in Usd.PrimRange(stage.GetPseudoRoot()):
+            if prim.GetTypeName() != "RenderProduct":
+                continue
+            if not prim.HasAPI("OmniSensorDepthSensorSingleViewAPI"):
+                continue
+            parameters = {attr.GetName().split(":")[-1]: attr.Get()
+                          for attr in prim.GetAttributes() if "depthSensor" in attr.GetName()}
+            optics, targets = {}, prim.GetRelationship("camera").GetTargets()
+            if targets:
+                camera = UsdGeom.Camera(stage.GetPrimAtPath(targets[0]))
+                optics = {"focal_length": camera.GetFocalLengthAttr().Get(),
+                          "horizontal_aperture": camera.GetHorizontalApertureAttr().Get(),
+                          "vertical_aperture": camera.GetVerticalApertureAttr().Get(),
+                          "camera_prim": str(targets[0])}
+            return parameters, optics
+        raise RuntimeError(f"No depth-sensor template render product in {url}")
+
+    def _build_vendor_camera(self, cfg, asset_root, stage):
+        """A camera rig carrying the vendor's optics and depth parameters."""
+        from isaacsim.sensors.experimental.rtx import RtxCamera
+        from pxr import UsdGeom
 
         relative = cfg["realsense"]["asset"]
         url = relative if "://" in relative else str(asset_root).rstrip("/") + "/" + relative.lstrip("/")
-        mount = "/World/SensorRig/realsense/Body"
-        authored = RtxCamera.create(mount, usd_path=url)
-        camera_path = authored.paths[0]
-        expected = cfg["realsense"].get("camera_prim_name")
-        if expected and not str(camera_path).endswith(expected):
-            raise RuntimeError(f"Vendor asset resolved to {camera_path}, expected a prim named "
-                               f"{expected}; the depth template targets a different camera")
-        self.mount_roots["realsense"] = mount
-        # The depth camera sits inside the body, so the mount has to be offset for
-        # the optical centre to land on the requested pose.
-        relative, _ = UsdGeom.XformCache(Usd.TimeCode.Default()).ComputeRelativeTransform(
-            stage.GetPrimAtPath(camera_path), stage.GetPrimAtPath(mount))
-        self.camera_in_mount = np.array(relative, dtype=float).T
-        return UsdGeom.Camera(stage.GetPrimAtPath(camera_path)), authored
-
-    @staticmethod
-    def _depth_parameters(sensor):
-        prim = sensor.render_product.GetPrim()
-        return {attr.GetName().split(":")[-1]: attr.Get() for attr in prim.GetAttributes()
-                if "depthSensor" in attr.GetName()}
+        parameters, optics = self.read_vendor_profile(url)
+        self.vendor_parameters["realsense"] = {**parameters, "source_asset": url, **optics}
+        path = "/World/SensorRig/realsense/Camera"
+        authored = RtxCamera(path)
+        camera = UsdGeom.Camera(stage.GetPrimAtPath(path))
+        camera.CreateFocalLengthAttr(float(optics["focal_length"]))
+        camera.CreateHorizontalApertureAttr(float(optics["horizontal_aperture"]))
+        camera.CreateVerticalApertureAttr(float(optics["vertical_aperture"]))
+        return camera, authored
 
     @staticmethod
     def _configure_native_resolution(prim):
@@ -167,22 +209,13 @@ class DepthSensorModule:
 
     def set_pose(self, optical_to_world):
         from pxr import Gf, UsdGeom
-        import omni.usd
         # USD cameras look down -Z with +Y up. Matrix4d uses row-vector convention.
         usd_to_optical = np.diag([1.0, -1.0, -1.0, 1.0])
         usd_to_world = optical_to_world @ usd_to_optical
-        stage = omni.usd.get_context().get_stage()
-        for mode, camera in self.camera_prims.items():
-            if mode in self.mount_roots:
-                # Move the whole sensor body so its depth camera lands on the pose.
-                target = usd_to_world @ np.linalg.inv(self.camera_in_mount)
-                prim = stage.GetPrimAtPath(self.mount_roots[mode])
-            else:
-                target = usd_to_world
-                prim = camera.GetPrim()
-            xform = UsdGeom.Xformable(prim)
+        for camera in self.camera_prims.values():
+            xform = UsdGeom.Xformable(camera.GetPrim())
             xform.ClearXformOpOrder()
-            xform.AddTransformOp().Set(Gf.Matrix4d(target.T.tolist()))
+            xform.AddTransformOp().Set(Gf.Matrix4d(usd_to_world.T.tolist()))
         self.pose = np.array(optical_to_world, copy=True)
 
     @staticmethod
@@ -206,7 +239,7 @@ class DepthSensorModule:
         if mode == "dip":
             valid = np.isfinite(depth) & (depth > 0)
             valid &= depth < self.cfg["camera"]["far_m"]
-            points = dip_to_points(depth, self.k)
+            points = dip_to_points(depth, self.intrinsics[mode])
             semantics = "axial_z_m; optical camera frame (+X right, +Y down, +Z forward)"
         else:
             # Undo the renderer's near**2 inflation; see RENDER_FAR_M above.
@@ -227,7 +260,9 @@ class DepthSensorModule:
             "rgb_annotator_info": rgb_info,
             "rgb_render_product": str(rgb_sensor.render_product),
             "rgb_source": "standard CameraSensor; same camera prim and optics as depth",
-            "K": self.k.tolist(), "optical_to_world": self.pose.tolist(),
+            "K": self.intrinsics[mode].tolist(),
+            "pixel_aligned_with_dip": self.pixel_aligned[mode],
+            "optical_to_world": self.pose.tolist(),
             "render_product": str(sensor.render_product),
             # Raw renderer output is recoverable as depth_m / dsd_depth_scale.
             "dsd_depth_scale": None if mode == "dip" else self.dsd_scale,

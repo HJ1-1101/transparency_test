@@ -25,6 +25,8 @@ class SensorReadTests(unittest.TestCase):
         module.cfg = {"dsd": {"min_distance_m": 0.4, "max_distance_m": 10.0}}
         module.depth_range = {"dsd": (0.4, 10.0)}
         module.vendor_parameters = {}
+        module.intrinsics = {"dsd": np.eye(3)}
+        module.pixel_aligned = {"dsd": True}
         module.dsd_scale = 1.0
         depth = np.array([[1, 0, np.nan], [0.3, 10, 2]], dtype=np.float32)
         points = np.arange(18, dtype=np.float32).reshape(2, 3, 3)
@@ -55,6 +57,8 @@ class SensorReadTests(unittest.TestCase):
         module.cfg = {"dsd": {"min_distance_m": 0.4, "max_distance_m": 10.0}}
         module.depth_range = {"dsd": (0.4, 10.0)}
         module.vendor_parameters = {}
+        module.intrinsics = {"dsd": np.eye(3)}
+        module.pixel_aligned = {"dsd": True}
         module.dsd_scale = 0.05**2
         true_m = np.array([[0.6, 0.8, 1.2]], dtype=np.float32)
         raw = true_m / module.dsd_scale

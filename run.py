@@ -243,11 +243,20 @@ def main():
                               "aim_point_m": aim.tolist()}
                     for mode, frame in frames.items():
                         stem = f"{index:05d}_scene_{mode}"
+                        # The reference is a DIP image, so it only lines up pixel for
+                        # pixel with cameras sharing DIP's field of view.
+                        if module.pixel_aligned[mode]:
+                            frame_reference, source = reference, reference_source
+                        else:
+                            frame_reference = np.full(module.resolution, np.nan, dtype=np.float32)
+                            source = ("unavailable; this camera uses vendor optics and its pixels "
+                                      "are not the same rays as DIP's, so the DIP image cannot be "
+                                      "differenced against it directly")
                         np.savez_compressed(output / f"{stem}.npz", depth_m=frame.depth_m,
                             valid=frame.valid, rgb=frame.rgb, points_native=frame.points_native,
-                            reference_depth_m=reference)
+                            reference_depth_m=frame_reference)
                         item = {**common, "valid_fraction_full_image": float(frame.valid.mean()),
-                                "reference_source": reference_source, **frame.metadata}
+                                "reference_source": source, **frame.metadata}
                         (output / f"{stem}.json").write_text(json.dumps(item, indent=2, default=str))
                         if not frame.valid.any():
                             empty_frames.append(stem)

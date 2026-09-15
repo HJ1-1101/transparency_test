@@ -40,7 +40,20 @@ GPU에서 에셋 로딩·렌더링·DIP/DSD 출력까지 실행 검증했다(검
 | dip | CameraSensor + distance_to_image_plane | 카메라 광축 Z 방향의 깊이 |
 | dsd | SingleViewDepthCameraSensor + depth_sensor_distance | 단일 뷰 기반 스테레오 깊이 후처리 결과 |
 | both | 동일 자세·광학 파라미터의 별도 카메라/RenderProduct 두 개 | 한 업데이트 뒤 두 출력을 수집 |
+| realsense | 벤더 프로파일 + SingleViewDepthCameraSensor | RealSense D455 광학·깊이 파라미터 |
 | lidar | `Lidar` + `LidarSensor` + `generic-model-output` | RTX 레이트레이싱 기반 희소 반환 |
+
+`--mode all`(기본)은 dip/dsd/realsense 세 카메라를 붙이고, `--no-lidar`가 없으면 Lidar까지 더해
+자세마다 npz 4개를 남긴다.
+**realsense는 D435i가 아니라 D455다.** 6.0.1은 D455/D457/D555만 제공한다.
+`realsense.asset`의 template render product에서 벤더 값을 읽어 적용한다:
+baseline 55 mm, focal 897 px, sensor 1280 px, max disparity 110 px, confidence 0.7, min distance 0.5 m.
+광학도 벤더 값(focal 1.93, aperture 3.896/2.453 → HFOV 90.5°)을 쓴다.
+**따라서 realsense는 다른 카메라와 화각이 다르고 같은 픽셀이 같은 광선이 아니다.**
+`pixel_aligned_with_dip=false`이며 `reference_depth_m`은 NaN으로 저장한다.
+비교하려면 각자의 `K`로 3D로 올린 뒤 맞춰야 한다.
+벤더 `maxDistance`는 1e7이라 유효성 판정이 무의미해지므로 `camera.far_m`으로 상한을 자른다.
+min distance 0.5 m는 촬영 거리 0.6 m와 가까워, 가까운 자세에서 컵 앞면이 잘릴 수 있다.
 
 `LidarModule`은 카메라와 같은 자세에 RTX Lidar를 놓고 같은 업데이트에서 읽는다.
 **깊이 annotator와 달리 레이트레이싱 결과이고 반환마다 non-visual material id가 붙는다.**
@@ -276,6 +289,16 @@ IWRL6432AOP 비교 실험. 물리 원리가 달라지는 확장은 '센서 교�
   사거리별 비교(마운트 0.25 m): 200 m → 460,861점/방 80.5 %, 3 m → 132,896점/35.4 %,
   2 m → 128,418점/34.5 %, 1.5 m → 106,353점/23.3 %.
   검증 실행은 `verify_lidar_range`(128,406점, 컵 4,451점, 상판 79,711점)이다.
+- 2026-09-15 RealSense가 엉뚱한 곳을 보던 문제: **참조(reference)로 들여온 에셋의 카메라는
+  옮겨도 렌더러가 따라오지 않는다.** USD xform op을 조상 prim에 쓰든 카메라 prim에 직접 쓰든,
+  Isaac의 `set_world_poses`로 월드 포즈를 쓰든 결과가 같았다. USD와 API readback은 모두
+  올바른 위치(-0.8, 0, 1.2455)와 방향(+X)을 보고했지만, 렌더 결과는 바이트 단위로 동일했고
+  방 바깥 지면을 비췄다. 즉 카메라는 에셋이 authored된 원래 자리(월드 원점 부근)에서 계속 렌더링됐다.
+  해결: 에셋을 **참조하지 않고 읽어서**(`Usd.Stage.Open`) template render product의 벤더 값과
+  광학만 가져오고, 포즈가 확실히 먹는 자체 카메라 rig에 적용한다.
+  검증(`verify_four_sensors`): realsense 유효 59.3 %, median 1.390 m로 DIP(1.387 m)와 일치하고
+  fx 317.0 / HFOV 90.5°로 벤더 광학이 반영된다. 사족으로 D455 본체 메시는 자기 카메라에서
+  5.3 m 떨어진 곳에 있어, 참조 방식이었다면 장면에 엉뚱한 물체를 남겼을 것이다.
 - 5개 기하 테스트 통과: 좌표계 handedness, 앞면 두께 보정, 경사각, axial/radial 차이,
   월드 평행이동 불변성, 카메라 뒤쪽 물체 배제.
 - 기본 설정 검사 통과.
